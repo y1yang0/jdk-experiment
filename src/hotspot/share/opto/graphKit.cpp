@@ -76,6 +76,7 @@ GraphKit::GraphKit()
   set_map(NULL);
   debug_only(_sp = -99);
   debug_only(set_bci(-99));
+  //TODO: assert C->initial_gvn() and C->for_igvn()
 }
 
 

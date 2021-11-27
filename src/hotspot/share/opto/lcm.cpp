@@ -818,7 +818,7 @@ static void add_call_kills(MachProjNode *proj, RegMask& regs, const char* save_p
 
 
 //------------------------------sched_call-------------------------------------
-uint PhaseCFG::sched_call(Block* block, uint node_cnt, Node_List& worklist, GrowableArray<int>& ready_cnt, MachCallNode* mcall, VectorSet& next_call) {
+uint PhaseCFG::sched_call(Matcher& matcher, Block* block, uint node_cnt, Node_List& worklist, GrowableArray<int>& ready_cnt, MachCallNode* mcall, VectorSet& next_call) {
   RegMask regs;
 
   // Schedule all the users of the call right now.  All the users are
@@ -856,7 +856,7 @@ uint PhaseCFG::sched_call(Block* block, uint node_cnt, Node_List& worklist, Grow
 
   // Act as if the call defines the Frame Pointer.
   // Certainly the FP is alive and well after the call.
-  regs.Insert(_matcher.c_frame_pointer());
+  regs.Insert(matcher.c_frame_pointer());
 
   // Set all registers killed and not already defined by the call.
   uint r_cnt = mcall->tf()->range()->cnt();
@@ -873,19 +873,19 @@ uint PhaseCFG::sched_call(Block* block, uint node_cnt, Node_List& worklist, Grow
     case Op_CallLeafNoFP:
     case Op_CallLeafVector:
       // Calling C code so use C calling convention
-      save_policy = _matcher._c_reg_save_policy;
+      save_policy = matcher._c_reg_save_policy;
       break;
 
     case Op_CallStaticJava:
     case Op_CallDynamicJava:
       // Calling Java code so use Java calling convention
-      save_policy = _matcher._register_save_policy;
+      save_policy = matcher._register_save_policy;
       break;
     case Op_CallNative:
       // We use the c reg save policy here since Foreign Linker
       // only supports the C ABI currently.
       // TODO compute actual save policy based on nep->abi
-      save_policy = _matcher._c_reg_save_policy;
+      save_policy = matcher._c_reg_save_policy;
       break;
 
     default:
@@ -927,7 +927,7 @@ uint PhaseCFG::sched_call(Block* block, uint node_cnt, Node_List& worklist, Grow
 
 //------------------------------schedule_local---------------------------------
 // Topological sort within a block.  Someday become a real scheduler.
-bool PhaseCFG::schedule_local(Block* block, GrowableArray<int>& ready_cnt, VectorSet& next_call, intptr_t *recalc_pressure_nodes) {
+bool PhaseCFG::schedule_local(Matcher& matcher, Block* block, GrowableArray<int>& ready_cnt, VectorSet& next_call, intptr_t *recalc_pressure_nodes) {
   // Already "sorted" are the block start Node (as the first entry), and
   // the block-ending Node and any trailing control projections.  We leave
   // these alone.  PhiNodes and ParmNodes are made to follow the block start
@@ -1146,20 +1146,20 @@ bool PhaseCFG::schedule_local(Block* block, GrowableArray<int>& ready_cnt, Vecto
 #endif
     if( n->is_MachCall() ) {
       MachCallNode *mcall = n->as_MachCall();
-      phi_cnt = sched_call(block, phi_cnt, worklist, ready_cnt, mcall, next_call);
+      phi_cnt = sched_call(matcher, block, phi_cnt, worklist, ready_cnt, mcall, next_call);
       continue;
     }
 
     if (n->is_Mach() && n->as_Mach()->has_call()) {
       RegMask regs;
-      regs.Insert(_matcher.c_frame_pointer());
+      regs.Insert(matcher.c_frame_pointer());
       regs.OR(n->out_RegMask());
 
       MachProjNode *proj = new MachProjNode( n, 1, RegMask::Empty, MachProjNode::fat_proj );
       map_node_to_block(proj, block);
       block->insert_node(proj, phi_cnt++);
 
-      add_call_kills(proj, regs, _matcher._c_reg_save_policy, false);
+      add_call_kills(proj, regs, matcher._c_reg_save_policy, false);
     }
 
     // Children are now all ready

@@ -1203,6 +1203,8 @@ class Compile : public Phase {
   CloneMap&     clone_map();
   void          set_clone_map(Dict* d);
 
+  JVMState* clone_jvms(SafePointNode* sfpt);
+
   bool needs_clinit_barrier(ciField* ik,         ciMethod* accessing_method);
   bool needs_clinit_barrier(ciMethod* ik,        ciMethod* accessing_method);
   bool needs_clinit_barrier(ciInstanceKlass* ik, ciMethod* accessing_method);

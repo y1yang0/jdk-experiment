@@ -175,6 +175,7 @@ class VectorMaskCmpNode;
 class VectorUnboxNode;
 class VectorSet;
 class VectorReinterpretNode;
+class VirtualAllocNode;
 
 // The type of all node counts and indexes.
 // It must hold at least 16 bits, but must also be fast to load and store.
@@ -760,6 +761,7 @@ public:
     DEFINE_CLASS_ID(Opaque1,  Node, 16)
     DEFINE_CLASS_ID(Move,     Node, 17)
     DEFINE_CLASS_ID(LShift,   Node, 18)
+    DEFINE_CLASS_ID(VirtualAlloc,   Node, 19)
 
     _max_classes  = ClassMask_Move
   };
@@ -946,6 +948,7 @@ public:
   DEFINE_CLASS_QUERY(StoreVector)
   DEFINE_CLASS_QUERY(StoreVectorScatter)
   DEFINE_CLASS_QUERY(Unlock)
+  DEFINE_CLASS_QUERY(VirtualAlloc)
 
   #undef DEFINE_CLASS_QUERY
 

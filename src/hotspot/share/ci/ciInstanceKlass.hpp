@@ -227,6 +227,17 @@ public:
     return _nonstatic_fields->at(i);
   }
 
+  // n-th for specific ciField, return -1 if failed to find such field
+  int nonstatic_field_nth(ciField* field) {
+    assert(field != NULL, "sanity check");
+    for (int i = 0; i < _nonstatic_fields->length(); i++) {
+      if (_nonstatic_fields->at(i) == field) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
   ciInstanceKlass* unique_concrete_subklass();
   bool has_finalizable_subclass();
 

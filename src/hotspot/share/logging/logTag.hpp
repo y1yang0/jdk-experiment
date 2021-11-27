@@ -133,6 +133,7 @@
   LOG_TAG(owner) \
   LOG_TAG(pagesize) \
   LOG_TAG(parser) \
+  LOG_TAG(partialea) \
   LOG_TAG(patch) \
   LOG_TAG(path) \
   LOG_TAG(perf) \

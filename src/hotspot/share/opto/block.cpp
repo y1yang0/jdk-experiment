@@ -39,7 +39,7 @@
 #include "utilities/powerOfTwo.hpp"
 
 void Block_Array::grow( uint i ) {
-  assert(i >= Max(), "must be an overflow");
+  assert(i >= max(), "must be an overflow");
   debug_only(_limit = i+1);
   if( i < _size )  return;
   if( !_size ) {
@@ -65,12 +65,78 @@ void Block_List::insert(uint i, Block *b) {
   _blocks[i] = b;
 }
 
+bool Block_List::contains(Block *b) {
+  for (uint i = 0; i < _cnt; i++) {
+    if (_blocks[i] == b) {
+      return true;
+    }
+  }
+  return false;
+}
+
 #ifndef PRODUCT
 void Block_List::print() {
   for (uint i=0; i < size(); i++) {
     tty->print("B%d ", _blocks[i]->_pre_order);
   }
   tty->print("size = %d\n", size());
+}
+#endif
+
+void Block_Queue::push_back(Block* block) {
+  BNode* node = new BNode();
+  node->_block = block;
+  node->_next = NULL;
+  if (_cnt == 0) {
+    // empty queue
+    _head = _tail = node;
+  } else {
+    _tail->_next = node;
+    _tail = node;
+  }
+  _cnt++;
+}
+
+Block* Block_Queue::pop_front() {
+  if (_cnt == 0) {
+    assert(_head == _tail && _tail == NULL, "why not");
+    guarantee(false, "pop block from empty queue");
+  }
+  BNode* node = _head;
+  Block* block = node->_block;
+  _head = _head->_next;
+  _cnt--;
+  if (_cnt == 0) {
+    assert(_head == NULL, "why not");
+    _tail = NULL;
+  }
+  return block;
+}
+
+void Block_Queue::reset() {
+  while (!is_empty()) {
+    pop_front();
+  }
+}
+
+#ifndef PRODUCT
+void Block_Queue::print() {
+  if (_cnt == 0) {
+    tty->print_cr("[]");
+    return;
+  }
+  tty->print("[");
+  BNode* node = _head;
+  while (node != NULL) {
+    Block* block = node->_block;
+    if (block == NULL) {
+      tty->print("null ");
+    } else {
+      tty->print("B%d ", block->_pre_order);
+    }
+    node = node->_next;
+  }
+  tty->print_cr("]");
 }
 #endif
 
@@ -367,22 +433,31 @@ void Block::dump(const PhaseCFG* cfg) const {
 }
 #endif
 
-PhaseCFG::PhaseCFG(Arena* arena, RootNode* root, Matcher& matcher)
+PhaseCFG::PhaseCFG(Arena* arena, RootNode* root, PhaseIterGVN* igvn)
 : Phase(CFG)
+, _igvn(igvn)
 , _root(root)
+, _root_block(NULL)
+, _number_of_blocks(-1)
 , _block_arena(arena)
 , _regalloc(NULL)
 , _scheduling_for_pressure(false)
-, _matcher(matcher)
 , _node_to_block_mapping(arena)
 , _node_latency(NULL)
+, _goto(NULL)
 #ifndef PRODUCT
 , _trace_opto_pipelining(C->directive()->TraceOptoPipeliningOption)
 #endif
 #ifdef ASSERT
 , _raw_oops(arena)
 #endif
-{
+{}
+
+// Build a proper looking CFG.  Make every block begin with either a StartNode
+// or a RegionNode.  Make every block end with either a Goto, If or Return.
+// The RootNode both starts and ends it's own block.  Do this with a recursive
+// backwards walk over the control edges.
+void PhaseCFG::build_cfg_skeleton(Matcher& matcher) {
   ResourceMark rm;
   // I'll need a few machine-specific GotoNodes.  Make an Ideal GotoNode,
   // then Match it into a machine-specific Node.  Then clone the machine
@@ -393,16 +468,6 @@ PhaseCFG::PhaseCFG(Arena* arena, RootNode* root, Matcher& matcher)
   assert(_goto != NULL, "");
   _goto->set_req(0,_goto);
 
-  // Build the CFG in Reverse Post Order
-  _number_of_blocks = build_cfg();
-  _root_block = get_block_for_node(_root);
-}
-
-// Build a proper looking CFG.  Make every block begin with either a StartNode
-// or a RegionNode.  Make every block end with either a Goto, If or Return.
-// The RootNode both starts and ends it's own block.  Do this with a recursive
-// backwards walk over the control edges.
-uint PhaseCFG::build_cfg() {
   VectorSet visited;
 
   // Allocate stack with enough space to avoid frequent realloc
@@ -494,8 +559,10 @@ uint PhaseCFG::build_cfg() {
               "too many control users, not a CFG?" );
     }
   }
-  // Return number of basic blocks for all children and self
-  return sum;
+  // Store number of basic blocks for all children and self
+  _number_of_blocks = sum;
+  _root_block = get_block_for_node(_root);
+  assert(_root_block != NULL, "sanity check");
 }
 
 // Inserts a goto & corresponding basic block between
@@ -1294,6 +1361,185 @@ void PhaseCFG::verify() const {
   }
 }
 #endif // ASSERT
+
+PhaseSimpleCFG::PhaseSimpleCFG(Compile* C, PhaseIterGVN* igvn) :
+  PhaseCFG(C->node_arena(), C->root(), igvn),
+  _igvn(igvn) {
+  build_cfg();
+  build_dominator_tree();
+  if (C->failing()) {
+    C->record_method_not_compilable("can not build domtree");
+    assert(false, "www");
+  }
+  NOT_PRODUCT(C->verify_graph_edges();)
+  schedule_nodes();
+}
+
+#ifndef PRODUCT
+// I need to add a new dump method because PhaseCFG::dump dumps CFG by
+// walking through _blocks while it's not available for PhaseSimpleCFG
+void PhaseSimpleCFG::dump() const {
+  ResourceMark rm;
+  Block_List queue, visited;
+  queue.push(get_root_block());
+  while (queue.size() > 0) {
+    Block* b = queue.pop();
+    if (!visited.contains(b)) {
+      visited.push(b);
+      assert(b->head()->is_Region() || b->head()->is_Root() || b->head()->is_Start(),
+            "start of block should be either region, root or start");
+      b->dump();
+        // push all successor onto pending queue
+      for (uint i = 0; i < b->_num_succs; i++) {
+        assert(b->_succs[i] != NULL, "sanity check");
+        queue.push(b->_succs[i]);
+      }
+    }
+  }
+  assert(number_of_blocks() == visited._cnt, "some blocks are not visited yet");
+}
+#endif
+
+// Build a proper looking CFG.  Make every block begin with either a StartNode
+// or a RegionNode.  Make every block end with either a Goto, If or Return.
+// The RootNode both starts and ends it's own block.  Do this with a recursive
+// backwards walk over the control edges.
+void PhaseSimpleCFG::build_cfg() {
+  VectorSet visited;
+
+  // Allocate stack with enough space to avoid frequent realloc
+  Node_Stack nstack(C->live_nodes() >> 1);
+  RootNode* root = C->root();
+  nstack.push(root, 0);
+  uint sum = 0;                 // Counter for blocks
+  Node* goto_ = new GotoNode(NULL);
+
+  while (nstack.is_nonempty()) {
+    // node and in's index from stack's top
+    // 'np' is _root (see above) or RegionNode, StartNode: we push on stack
+    // only nodes which point to the start of basic block (see below).
+    Node *np = nstack.node();
+    // idx > 0, except for the first node (_root) pushed on stack
+    // at the beginning when idx == 0.
+    // We will use the condition (idx == 0) later to end the build.
+    uint idx = nstack.index();
+    Node *proj = np->in(idx);
+    const Node *x = proj->is_block_proj();
+    // Does the block end with a proper block-ending Node?  One of Return,
+    // If or Goto? (This check should be done for visited nodes also).
+    if (x == NULL) {                    // Does not end right...
+      Node *g = goto_->clone(); // Force it to end in a Goto
+      g->set_req(0, proj);
+      _igvn->register_new_node_with_optimizer(g);
+      _igvn->replace_input_of(np, idx, g);
+      x = proj = g;
+    }
+    if (!visited.test_set(x->_idx)) { // Visit this block once
+      // Skip any control-pinned middle'in stuff
+      Node *p = proj;
+      do {
+        proj = p;                   // Update pointer to last Control
+        p = p->in(0);               // Move control forward
+      } while( !p->is_block_proj() &&
+               !p->is_block_start() );
+      // Make the block begin with one of Region or StartNode.
+      if( !p->is_block_start() ) {
+        RegionNode *r = new RegionNode(2);
+        r->init_req(1, p);                          // Insert RegionNode in the way
+        _igvn->register_new_node_with_optimizer(r); // Insert RegionNode in the way
+        _igvn->replace_input_of(proj, 0, r);
+        p = r;
+      }
+      // 'p' now points to the start of this basic block
+
+      // Put self in array of basic blocks
+      Block* bb = new (C->node_arena()) Block(C->node_arena(), p);
+      map_node_to_block(p, bb);
+      map_node_to_block(x, bb);
+      if( x != p ) {                // Only for root is x == p
+        bb->push_node((Node*)x);
+      }
+      // Now handle predecessors
+      ++sum;                        // Count 1 for self block
+      uint cnt = bb->num_preds();
+      for (int i = (cnt - 1); i > 0; i-- ) { // For all predecessors
+        Node *prevproj = p->in(i);  // Get prior input
+        assert( !prevproj->is_Con(), "dead input not removed" );
+        // Check to see if p->in(i) is a "control-dependent" CFG edge -
+        // i.e., it splits at the source (via an IF or SWITCH) and merges
+        // at the destination (via a many-input Region).
+        // This breaks critical edges.  The RegionNode to start the block
+        // will be added when <p,i> is pulled off the node stack
+        if ( cnt > 2 ) {             // Merging many things?
+          assert( prevproj== bb->pred(i),"");
+          if(prevproj->is_block_proj() != prevproj) { // Control-dependent edge?
+            // Force a block on the control-dependent edge
+            Node *g = goto_->clone();       // Force it to end in a Goto
+            g->set_req(0,prevproj);
+            _igvn->register_new_node_with_optimizer(g);
+            _igvn->replace_input_of(p, i, g);
+          }
+        }
+        nstack.push(p, i);  // 'p' is RegionNode or StartNode
+      }
+    } else { // Post-processing visited nodes
+      nstack.pop();                 // remove node from stack
+      // Check if it the fist node pushed on stack at the beginning.
+      if (idx == 0) break;          // end of the build
+      // Find predecessor basic block
+      Block *pb = get_block_for_node(x);
+      // Insert into nodes array, if not already there
+      if (!has_block(proj)) {
+        assert( x != proj, "" );
+        // Map basic block of projection
+        map_node_to_block(proj, pb);
+        pb->push_node(proj);
+      }
+      // Insert self as a child of my predecessor block
+      pb->_succs.map(pb->_num_succs++, get_block_for_node(np));
+      assert( pb->get_node(pb->number_of_nodes() - pb->_num_succs)->is_block_proj(),
+              "too many control users, not a CFG?" );
+    }
+  }
+  // Store number of basic blocks for all children and self
+  _number_of_blocks = sum;
+  _root_block = get_block_for_node(C->root());
+}
+
+void PhaseSimpleCFG::schedule_nodes() {
+  VectorSet visited;
+  schedule_pinned_nodes(visited); 
+  visited.clear();
+
+  Node_Stack stack((C->live_nodes() >> 2) + 16); // pre-grow
+  if (!schedule_early(visited, stack)) {
+    // Bailout without retry
+    C->record_method_not_compilable("early schedule failed");
+    assert(false, "www");
+  }
+  visited.clear();
+  // TODO: verify current basic block only contains pinned or control proj
+
+  // Put nodes into real basic block
+  // Allocate node stack of size C->live_nodes()+8 to avoid frequent realloc
+  GrowableArray <Node*> spstack(C->live_nodes() + 8);
+  spstack.push(_root);
+  while (spstack.is_nonempty()) {
+    Node* node = spstack.pop();
+    if (!visited.test_set(node->_idx)) {
+      Block* block = get_block_for_node(node);
+      if (!block->contains(node)) {
+        block->add_inst(node);
+      }
+      // process all inputs that are non NULL
+      for (int i = node->req()-1; i >= 0; --i) {
+        if (node->in(i) != NULL) {
+          spstack.push(node->in(i));
+        }
+      }
+    }
+  }
+}
 
 UnionFind::UnionFind( uint max ) : _cnt(max), _max(max), _indices(NEW_RESOURCE_ARRAY(uint,max)) {
   Copy::zero_to_bytes( _indices, sizeof(uint)*max );

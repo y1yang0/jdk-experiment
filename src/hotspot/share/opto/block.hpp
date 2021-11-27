@@ -64,12 +64,12 @@ public:
     }
   }
   Block *lookup( uint i ) const // Lookup, or NULL for not mapped
-  { return (i<Max()) ? _blocks[i] : (Block*)NULL; }
+  { return (i<max()) ? _blocks[i] : (Block*)NULL; }
   Block *operator[] ( uint i ) const // Lookup, or assert for not mapped
-  { assert( i < Max(), "oob" ); return _blocks[i]; }
+  { assert( i < max(), "oob" ); return _blocks[i]; }
   // Extend the mapping: index i maps to Block *n.
-  void map( uint i, Block *n ) { if( i>=Max() ) grow(i); _blocks[i] = n; }
-  uint Max() const { debug_only(return _limit); return _size; }
+  void map( uint i, Block *n ) { if( i>=max() ) grow(i); _blocks[i] = n; }
+  uint max() const { debug_only(return _limit); return _size; }
 };
 
 
@@ -83,8 +83,31 @@ public:
   Block *rpop() { Block *b = _blocks[0]; _blocks[0]=_blocks[--_cnt]; return b;}
   void remove( uint i );
   void insert( uint i, Block *n );
+  bool contains(Block* b);
   uint size() const { return _cnt; }
   void reset() { _cnt = 0; }
+  void print();
+};
+
+// Block_List based queue may causes infinite loop, I really need a real queue
+class Block_Queue : public ResourceObj {
+private:
+  struct BNode: public ResourceObj{
+    Block* _block;
+    BNode* _next;
+  };
+  uint _cnt;
+  BNode* _head;
+  BNode* _tail;
+
+public:
+  Block_Queue() : _cnt(0), _head(NULL), _tail(NULL) {}
+  void push_back(Block* b);
+  Block* pop_front();
+  void reset();
+  void clear() { reset(); }
+  bool is_empty() { return _cnt == 0; }
+  uint max() { return _cnt; }
   void print();
 };
 
@@ -367,7 +390,10 @@ public:
 // Build an array of Basic Block pointers, one per Node.
 class PhaseCFG : public Phase {
   friend class VMStructs;
- private:
+ protected:
+  // IGVN for recording modified nodes
+  PhaseIterGVN* _igvn;
+
   // Root of whole program
   RootNode* _root;
 
@@ -389,9 +415,6 @@ class PhaseCFG : public Phase {
   // Register pressure heuristic used?
   bool _scheduling_for_pressure;
 
-  // The matcher for this compilation
-  Matcher& _matcher;
-
   // Map nodes to owning basic block
   Block_Array _node_to_block_mapping;
 
@@ -404,8 +427,8 @@ class PhaseCFG : public Phase {
   // Per node latency estimation, valid only during GCM
   GrowableArray<uint>* _node_latency;
 
-  // Build a proper looking cfg.  Return count of basic blocks
-  uint build_cfg();
+  // Build a proper looking cfg.
+  void build_cfg_skeleton(Matcher& matcher);
 
   // Build the dominator tree so that we know where we can move instructions
   void build_dominator_tree();
@@ -416,7 +439,7 @@ class PhaseCFG : public Phase {
   // Global Code Motion.  See Click's PLDI95 paper.  Place Nodes in specific
   // basic blocks; i.e. _node_to_block_mapping now maps _idx for all Nodes to some Block.
   // Move nodes to ensure correctness from GVN and also try to move nodes out of loops.
-  void global_code_motion();
+  void global_code_motion(Matcher& matcher);
 
   // Schedule Nodes early in their basic blocks.
   bool schedule_early(VectorSet &visited, Node_Stack &roots);
@@ -445,7 +468,7 @@ class PhaseCFG : public Phase {
   // to late. Helper for schedule_late.
   Block* hoist_to_cheaper_block(Block* LCA, Block* early, Node* self);
 
-  bool schedule_local(Block* block, GrowableArray<int>& ready_cnt, VectorSet& next_call, intptr_t* recacl_pressure_nodes);
+  bool schedule_local(Matcher& matcher, Block* block, GrowableArray<int>& ready_cnt, VectorSet& next_call, intptr_t* recacl_pressure_nodes);
   void set_next_call(Block* block, Node* n, VectorSet& next_call);
   void needed_for_next_call(Block* block, Node* this_call, VectorSet& next_call);
 
@@ -455,7 +478,7 @@ class PhaseCFG : public Phase {
   void adjust_register_pressure(Node* n, Block* block, intptr_t *recalc_pressure_nodes, bool finalize_mode);
 
   // Schedule a call next in the block
-  uint sched_call(Block* block, uint node_cnt, Node_List& worklist, GrowableArray<int>& ready_cnt, MachCallNode* mcall, VectorSet& next_call);
+  uint sched_call(Matcher& matcher, Block* block, uint node_cnt, Node_List& worklist, GrowableArray<int>& ready_cnt, MachCallNode* mcall, VectorSet& next_call);
 
   // Cleanup if any code lands between a Call and his Catch
   void call_catch_cleanup(Block* block);
@@ -515,7 +538,7 @@ class PhaseCFG : public Phase {
   #endif
 
  public:
-  PhaseCFG(Arena* arena, RootNode* root, Matcher& matcher);
+  PhaseCFG(Arena* arena, RootNode* root, PhaseIterGVN* igvn = NULL);
 
   void set_latency_for_node(Node* node, int latency) {
     _node_latency->at_put_grow(node->_idx, latency);
@@ -598,7 +621,7 @@ class PhaseCFG : public Phase {
 
   // Do global code motion by first building dominator tree and estimate block frequency
   // Returns true on success
-  bool do_global_code_motion();
+  bool do_global_code_motion(Matcher& matcher);
 
   // Compute the (backwards) latency of a node from the uses
   void latency_from_uses(Node *n);
@@ -639,6 +662,24 @@ class PhaseCFG : public Phase {
   void verify() const NOT_DEBUG_RETURN;
 };
 
+//------------------------------PhaseSimpleCFG---------------------------------------
+// Build simple control flow graph, roughly schedule nodes into basic blocks
+class PhaseSimpleCFG : public PhaseCFG {
+private:
+  PhaseIterGVN* _igvn;
+
+private:
+  void build_cfg();
+
+  void schedule_nodes();
+
+public:
+  PhaseSimpleCFG(Compile* C, PhaseIterGVN* igvn);
+
+#ifndef PRODUCT
+  void dump() const;
+#endif
+};
 
 //------------------------------UnionFind--------------------------------------
 // Map Block indices to a block-index for a cfg-cover.

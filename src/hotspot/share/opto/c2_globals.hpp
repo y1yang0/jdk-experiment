@@ -474,6 +474,19 @@
   product(bool, DoEscapeAnalysis, true,                                     \
           "Perform escape analysis")                                        \
                                                                             \
+  product(bool, DoPartialEscapeAnalysis, false,                             \
+          "Perform partial escape analysis")                                \
+                                                                            \
+  product(intx, PartialEAArrayAllocLimit, 32,                               \
+          "PEA can process array allocation when its statically known size" \
+          "is less than specified")                                         \
+                                                                            \
+  develop(bool, DumpCFGDuringPEA, false,                                    \
+          "Dump CFG during Partial Escape Analysis")                        \
+                                                                            \
+  develop(bool, TracePartialEscapeAnalysis, false,                          \
+          "Trace execution of Partial Escape Analysis")                     \
+                                                                            \
   product(double, EscapeAnalysisTimeout, 20. DEBUG_ONLY(+40.),              \
           "Abort EA when it reaches time limit (in sec)")                   \
           range(0, DBL_MAX)                                                 \

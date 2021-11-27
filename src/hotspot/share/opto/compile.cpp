@@ -51,6 +51,7 @@
 #include "opto/convertnode.hpp"
 #include "opto/divnode.hpp"
 #include "opto/escape.hpp"
+#include "opto/partialEscape.hpp"
 #include "opto/idealGraphPrinter.hpp"
 #include "opto/loopnode.hpp"
 #include "opto/machnode.hpp"
@@ -2161,6 +2162,11 @@ void Compile::Optimize() {
       if (major_progress()) print_method(PHASE_PHASEIDEAL_BEFORE_EA, 2);
       if (failing())  return;
     }
+    if (DoPartialEscapeAnalysis) {
+      TracePhase tp("partialEscapeAnalysis", &timers[_t_partialEscapeAnalysis]);
+      PhasePartialEA pea(&igvn);
+      pea.do_analysis();
+    }
     ConnectionGraph::do_analysis(this, &igvn);
 
     if (failing())  return;
@@ -2716,11 +2722,11 @@ void Compile::Code_Gen() {
   print_method(PHASE_MATCHING, 2);
 
   // Build a proper-looking CFG
-  PhaseCFG cfg(node_arena(), root(), matcher);
+  PhaseCFG cfg(node_arena(), root());
   _cfg = &cfg;
   {
     TracePhase tp("scheduler", &timers[_t_scheduler]);
-    bool success = cfg.do_global_code_motion();
+    bool success = cfg.do_global_code_motion(matcher);
     if (!success) {
       return;
     }
@@ -4670,6 +4676,17 @@ bool Compile::randomized_select(int count) {
 
 CloneMap&     Compile::clone_map()                 { return _clone_map; }
 void          Compile::set_clone_map(Dict* d)      { _clone_map._dict = d; }
+
+JVMState* Compile::clone_jvms(SafePointNode* sfpt) {
+  JVMState* new_jvms = sfpt->jvms()->clone_shallow(this);
+  uint size = sfpt->req();
+  SafePointNode* map = new SafePointNode(size, new_jvms);
+  for (uint i = 0; i < size; i++) {
+    map->init_req(i, sfpt->in(i));
+  }
+  new_jvms->set_map(map);
+  return new_jvms;
+}
 
 void NodeCloneInfo::dump() const {
   tty->print(" {%d:%d} ", idx(), gen());

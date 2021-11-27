@@ -217,7 +217,7 @@ uint Block_Stack::most_frequent_successor( Block *b ) {
   switch( op ) {
   case Op_CountedLoopEnd:
   case Op_If: {               // Split frequency amongst children
-    float prob = n->as_MachIf()->_prob;
+    float prob = n->is_Mach() ? n->as_MachIf()->_prob : n->as_If()->_prob;
     // Is succ[0] the TRUE branch or the FALSE branch?
     if( b->get_node(eidx+1)->Opcode() == Op_IfFalse )
       prob = 1.0f - prob;
@@ -239,14 +239,6 @@ uint Block_Stack::most_frequent_successor( Block *b ) {
   case Op_NeverBranch:
     freq_idx = 0;               // fall thru
     break;
-  case Op_TailCall:
-  case Op_TailJump:
-  case Op_Return:
-  case Op_Halt:
-  case Op_Rethrow:
-    break;
-  default:
-    ShouldNotReachHere();
   }
   return freq_idx;
 }

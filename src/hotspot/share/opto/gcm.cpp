@@ -80,7 +80,7 @@ void PhaseCFG::replace_block_proj_ctrl( Node *n ) {
   assert(in0 != NULL, "Only control-dependent");
   const Node *p = in0->is_block_proj();
   if (p != NULL && p != n) {    // Control from a block projection?
-    assert(!n->pinned() || n->is_MachConstantBase(), "only pinned MachConstantBase node is expected here");
+    // assert(n->pinned() || n->is_MachConstantBase(), "only pinned MachConstantBase node is expected here");
     // Find trailing Region
     Block *pb = get_block_for_node(in0); // Block-projection already has basic block
     uint j = 0;
@@ -98,7 +98,11 @@ void PhaseCFG::replace_block_proj_ctrl( Node *n ) {
       // Change control to match head of successor basic block
       j -= start;
     }
-    n->set_req(0, pb->_succs[j]->head());
+    if (_igvn != NULL) {
+      _igvn->replace_input_of(n, 0, pb->_succs[j]->head());
+    } else {
+      n->set_req(0, pb->_succs[j]->head());
+    }
   }
 }
 
@@ -235,7 +239,11 @@ void PhaseCFG::schedule_pinned_nodes(VectorSet &visited) {
         assert(node->in(0), "control should have been set");
         assert(is_dominator(n, node->in(0)) || is_dominator(node->in(0), n), "one must dominate the other");
         if (!is_dominator(n, node->in(0))) {
-          node->set_req(0, n);
+          if (_igvn!=NULL) {
+            _igvn->replace_input_of(node, 0, n);
+          } else {
+            node->set_req(0, n);
+          }
         }
       }
 
@@ -330,7 +338,11 @@ bool PhaseCFG::schedule_early(VectorSet &visited, Node_Stack &roots) {
         } else {
           // Is a constant with NO inputs?
           if (parent_node->req() == 1) {
-            parent_node->set_req(0, _root);
+            if (_igvn!=NULL) {
+              _igvn->replace_input_of(parent_node, 0, _root);
+            } else {
+              parent_node->set_req(0, _root);
+            }
           }
         }
       }
@@ -1475,7 +1487,7 @@ void PhaseCFG::schedule_late(VectorSet &visited, Node_Stack &stack) {
 } // end ScheduleLate
 
 //------------------------------GlobalCodeMotion-------------------------------
-void PhaseCFG::global_code_motion() {
+void PhaseCFG::global_code_motion(Matcher& matcher) {
   ResourceMark rm;
 
 #ifndef PRODUCT
@@ -1485,8 +1497,8 @@ void PhaseCFG::global_code_motion() {
 #endif
 
   // Initialize the node to block mapping for things on the proj_list
-  for (uint i = 0; i < _matcher.number_of_projections(); i++) {
-    unmap_node_from_block(_matcher.get_projection(i));
+  for (uint i = 0; i < matcher.number_of_projections(); i++) {
+    unmap_node_from_block(matcher.get_projection(i));
   }
 
   // Set the basic block for Nodes pinned into blocks
@@ -1535,9 +1547,9 @@ void PhaseCFG::global_code_motion() {
     // By reversing the loop direction we get a very minor gain on mpegaudio.
     // Feel free to revert to a forward loop for clarity.
     // for( int i=0; i < (int)matcher._null_check_tests.size(); i+=2 ) {
-    for (int i = _matcher._null_check_tests.size() - 2; i >= 0; i -= 2) {
-      Node* proj = _matcher._null_check_tests[i];
-      Node* val  = _matcher._null_check_tests[i + 1];
+    for (int i = matcher._null_check_tests.size() - 2; i >= 0; i -= 2) {
+      Node* proj = matcher._null_check_tests[i];
+      Node* val  = matcher._null_check_tests[i + 1];
       Block* block = get_block_for_node(proj);
       implicit_null_check(block, proj, val, C->allowed_deopt_reasons());
       // The implicit_null_check will only perform the transformation
@@ -1562,7 +1574,7 @@ void PhaseCFG::global_code_motion() {
 
   // Enabling the scheduler for register pressure plus finding blocks of size to schedule for it
   // is key to enabling this feature.
-  PhaseChaitin regalloc(C->unique(), *this, _matcher, true);
+  PhaseChaitin regalloc(C->unique(), *this, matcher, true);
   ResourceArea live_arena(mtCompiler);      // Arena for liveness
   ResourceMark rm_live(&live_arena);
   PhaseLive live(*this, regalloc._lrg_map.names(), &live_arena, true);
@@ -1598,7 +1610,7 @@ void PhaseCFG::global_code_motion() {
   visited.reset();
   for (uint i = 0; i < number_of_blocks(); i++) {
     Block* block = get_block(i);
-    if (!schedule_local(block, ready_cnt, visited, recalc_pressure_nodes)) {
+    if (!schedule_local(matcher, block, ready_cnt, visited, recalc_pressure_nodes)) {
       if (!C->failure_reason_is(C2Compiler::retry_no_subsuming_loads())) {
         C->record_method_not_compilable("local schedule failed");
       }
@@ -1628,7 +1640,8 @@ void PhaseCFG::global_code_motion() {
   _node_latency = (GrowableArray<uint> *)((intptr_t)0xdeadbeef);
 }
 
-bool PhaseCFG::do_global_code_motion() {
+bool PhaseCFG::do_global_code_motion(Matcher& matcher) {
+  build_cfg_skeleton(matcher);
 
   build_dominator_tree();
   if (C->failing()) {
@@ -1639,7 +1652,7 @@ bool PhaseCFG::do_global_code_motion() {
 
   estimate_block_frequency();
 
-  global_code_motion();
+  global_code_motion(matcher);
 
   if (C->failing()) {
     return false;
@@ -1911,7 +1924,12 @@ void CFGLoop::compute_freq() {
       Block* b = s->as_Block();
       for (uint j = 0; j < b->_num_succs; j++) {
         Block* sb = b->_succs[j];
-        update_succ_freq(sb, freq * b->succ_prob(j));
+        Node* blast = b->get_node(b->end_idx());
+        if (blast->isa_Mach()) {
+          update_succ_freq(sb, freq * b->succ_prob(j));
+        } else {
+          update_succ_freq(sb, 0.0f);
+        }
       }
     } else {
       CFGLoop* lp = s->as_CFGLoop();
@@ -2211,6 +2229,18 @@ bool CFGLoop::in_loop_nest(Block* b) {
     b_depth = b_loop->_depth;
   }
   return b_loop == this;
+}
+
+//------------------------------is_loop_exit-----------------------------------
+// Determine if this block is one of loop exit blocks
+bool CFGLoop::is_loop_exit(Block* b) {
+  for (int i = 0; i < _exits.length(); i++) {
+    BlockProbPair* pair = _exits.adr_at(i);
+    if (pair->get_target() == b) {
+      return true;
+    }
+  }
+  return false;
 }
 
 //------------------------------scale_freq-------------------------------------

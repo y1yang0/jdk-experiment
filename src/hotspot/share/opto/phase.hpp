@@ -59,6 +59,7 @@ public:
     Ideal_Loop,                       // Find idealized trip-counted loops
     Macro_Expand,                     // Expand macro nodes
     Peephole,                         // Apply peephole optimizations
+    PartialEA,                        // Partial escape analysis
     Vector,
     Output,
     last_phase
@@ -70,6 +71,7 @@ public:
       _t_escapeAnalysis,
         _t_connectionGraph,
         _t_macroEliminate,
+      _t_partialEscapeAnalysis,
       _t_iterGVN,
       _t_incrInline,
         _t_incrInline_ideal,

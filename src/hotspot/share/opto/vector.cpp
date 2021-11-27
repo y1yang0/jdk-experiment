@@ -156,17 +156,6 @@ void PhaseVector::eliminate_vbox_alloc_nodes() {
   }
 }
 
-static JVMState* clone_jvms(Compile* C, SafePointNode* sfpt) {
-  JVMState* new_jvms = sfpt->jvms()->clone_shallow(C);
-  uint size = sfpt->req();
-  SafePointNode* map = new SafePointNode(size, new_jvms);
-  for (uint i = 0; i < size; i++) {
-    map->init_req(i, sfpt->in(i));
-  }
-  new_jvms->set_map(map);
-  return new_jvms;
-}
-
 void PhaseVector::scalarize_vbox_node(VectorBoxNode* vec_box) {
   Node* vec_value = vec_box->in(VectorBoxNode::Value);
   PhaseGVN& gvn = *C->initial_gvn();
@@ -189,7 +178,7 @@ void PhaseVector::scalarize_vbox_node(VectorBoxNode* vec_box) {
       CallJavaNode* call = calls.pop()->as_CallJava();
       // Attach new VBA to the call and use it instead of Phi (VBA ... VBA).
 
-      JVMState* jvms = clone_jvms(C, call);
+      JVMState* jvms = C->clone_jvms(call);
       GraphKit kit(jvms);
       PhaseGVN& gvn = kit.gvn();
 
@@ -344,7 +333,7 @@ Node* PhaseVector::expand_vbox_alloc_node(VectorBoxAllocateNode* vbox_alloc,
                                           Node* value,
                                           const TypeInstPtr* box_type,
                                           const TypeVect* vect_type) {
-  JVMState* jvms = clone_jvms(C, vbox_alloc);
+  JVMState* jvms = C->clone_jvms(vbox_alloc);
   GraphKit kit(jvms);
   PhaseGVN& gvn = kit.gvn();
 
@@ -486,7 +475,7 @@ void PhaseVector::expand_vunbox_node(VectorUnboxNode* vec_unbox) {
 }
 
 void PhaseVector::eliminate_vbox_alloc_node(VectorBoxAllocateNode* vbox_alloc) {
-  JVMState* jvms = clone_jvms(C, vbox_alloc);
+  JVMState* jvms = C->clone_jvms(vbox_alloc);
   GraphKit kit(jvms);
   // Remove VBA, but leave a safepoint behind.
   // Otherwise, it may end up with a loop without any safepoint polls.

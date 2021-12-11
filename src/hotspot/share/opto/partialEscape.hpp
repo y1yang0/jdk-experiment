@@ -94,7 +94,7 @@ public:
 #endif
 };
 
-// Used to iterate _aliases and _alloc_states
+// Used to iterate _aliases and _alloc_states, e.g.
 // for (AliasStateIter iter(_aliases); iter.has_next(); iter.next()) {
 //   ... = iter.key();
 //   ... = iter.value();

@@ -167,6 +167,13 @@ PhasePartialEA::PhasePartialEA(PhaseIterGVN *igvn) :
 }
 
 void PhasePartialEA::materialize(VirtualAllocNode* valloc, BlockState* bstate, bool* has_materialization) {
+#ifdef ASSERT
+  if (TracePartialEscapeAnalysis) {
+    tty->print_cr("== Materialize virtual allocation N%d", valloc->_idx);
+    tty->print("  ");
+    valloc->dump();
+  }
+#endif
   // I think we already misuse the following pattern in other places.
   C->for_igvn()->clear();
   C->initial_gvn()->replace_with(_igvn);
@@ -181,6 +188,7 @@ void PhasePartialEA::materialize(VirtualAllocNode* valloc, BlockState* bstate, b
   if (kit.has_exceptions()) {
     C->rethrow_exceptions(kit.transfer_exceptions_into_jvms());
   }
+  *has_materialization = true;
 }
 
 // Find all nth fields from predecessor block state, wire them into newly created PhiNode
@@ -383,6 +391,11 @@ BlockState* PhasePartialEA::merge_block_states(GrowableArray<BlockState*>* pred_
         PhiNode* phi = use->as_Phi();
         merge_phi(pred_bstates, merged_bstate, phi, &has_materialization);
       }
+    }
+
+    if(has_materialization) {
+      // TODO: invalidate previous assumptions about which objects are virtual
+
     }
   } while(has_materialization);
 

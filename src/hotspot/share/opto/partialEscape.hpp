@@ -179,6 +179,7 @@ public:
 
 class PhasePartialEA : public Phase {
 private:
+  PhaseSimpleCFG* _cfg;
   PhaseIterGVN* _igvn;
   ResourceHashtable<uint, BlockState*> _block_states;
   RegionNode* _merge_point;

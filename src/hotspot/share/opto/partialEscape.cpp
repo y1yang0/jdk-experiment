@@ -159,6 +159,7 @@ void BlockState::dump() {
 
 PhasePartialEA::PhasePartialEA(PhaseIterGVN *igvn) :
   Phase(PartialEA),
+  _cfg(NULL),
   _igvn(igvn),
   _merge_point(NULL),
   _has_allocation(false) {
@@ -215,28 +216,55 @@ PhiNode* PhasePartialEA::create_phi_for_field(GrowableArray<BlockState*>* pred_b
   return phi;
 }
 
-// If some field values differ, creates a new Phi node for this field. If a field
-// that should be merged references a virtual object (i.e., a VirtualAlloc node with
-// a VirtualState), this object needs to be materialized before merging.
+// Merge multi VirtualStates with the same VirtualAllocNode
 void PhasePartialEA::merge_fields(GrowableArray<BlockState*>* pred_bstates, BlockState* merged_bstate, Node* alias_key_node) {
   VirtualAllocNode* alloc0 = pred_bstates->at(0)->get_alias(alias_key_node)->as_VirtualAlloc();
   VirtualState* vs0 = pred_bstates->at(0)->get_alloc_state(alloc0)->as_VirtualState();
+
+  bool all_identical = true;
+  for (int j = 1; j < pred_bstates->length(); j++) {
+    Node* alloc_tmp = pred_bstates->at(j)->get_alias(alias_key_node);
+#ifdef ASSERT
+    assert(alloc_tmp == alloc0, "must be");
+#endif
+    VirtualState* vs_tmp = pred_bstates->at(j)->get_alloc_state(alloc0)->as_VirtualState();
+    if (!vs_tmp->equals(vs0)) {
+      all_identical = false;
+      break;
+    }
+  }
+
+  // If all field values are identical, this value will be the value of the field in
+  // the new VirtualState.
+  if (all_identical) {
+    merged_bstate->add_alias(alias_key_node, alloc0);
+    merged_bstate->add_alloc_state(alloc0, vs0->clone());
+    return;
+  }
+
+  // If some field values differ, creates a new Phi node for this field. If a field
+  // that should be merged references a virtual object (i.e., a VirtualAlloc node with
+  // a VirtualState), this object needs to be materialized before merging.
   VirtualState* merged_vs = new VirtualState(vs0->nof_field());
   for (int field_i = 0; field_i < vs0->nof_field(); field_i++) { // for each field
     Node* field = vs0->get_field(field_i);
 
-    // If this field is the same in all predecessor block state
-    // then the merged field will not change
-    bool no_difference = true;
+    bool same_field = true;
     for (int pred_i = 1; pred_i < pred_bstates->length(); pred_i++) {
       VirtualState* vs_tmp = pred_bstates->at(pred_i)->get_alloc_state(alloc0)->as_VirtualState();
       Node* pred_field = vs_tmp->get_field(field_i);
       if (pred_field != field) {
-        no_difference = false;
+        same_field = false;
         break;
       }
     }
-    if (no_difference) {
+    // If this field is the same in all predecessor block state
+    if (same_field) {
+      // Same fields, but refer to another VirtualAlloc, apply merge_fields recursively
+      if (field != NULL && field->isa_VirtualAlloc()) {
+        merge_fields(pred_bstates, merged_bstate, field);
+      }
+      // Same trivial fields, that's pretty fine, the merged field will not change
       merged_vs->set_field(field_i, field);
       continue;
     }
@@ -293,7 +321,6 @@ void PhasePartialEA::merge_phi(GrowableArray<BlockState*>* pred_bstates, BlockSt
 // Merge multi state in predecessors, resulting in merged state, which will be used
 // in CFG merge block
 BlockState* PhasePartialEA::merge_block_states(GrowableArray<BlockState*>* pred_bstates) {
-  tty->print_cr("merge state");
   assert(pred_bstates->length() >= 2, "sanity check");
   assert(get_merge_point() != NULL, "merge point node is not set");
 
@@ -344,30 +371,7 @@ BlockState* PhasePartialEA::merge_block_states(GrowableArray<BlockState*>* pred_
         assert(false, "not implement");
       } else {
         // Not escaped in all predecessors
-        VirtualAllocNode* alloc0 = pred_bstates->at(0)->get_alias(node)->as_VirtualAlloc();
-        VirtualState* vs0 = pred_bstates->at(0)->get_alloc_state(alloc0)->as_VirtualState();
-
-        bool all_identical = true;      
-        for (int j = 1; j < pred_bstates->length(); j++) {
-          Node* alloc_tmp = pred_bstates->at(j)->get_alias(node);
-  #ifdef ASSERT
-          assert(alloc_tmp == alloc0, "must be");
-  #endif
-          VirtualState* vs_tmp = pred_bstates->at(j)->get_alloc_state(alloc0)->as_VirtualState();
-          if (!vs_tmp->equals(vs0)) {
-            all_identical = false;
-            break;
-          }
-        }
-        // If all field values are identical, this value will be the value of the field in
-        // the new VirtualState.
-        if (all_identical) {
-          merged_bstate->add_alias(node, alloc0);
-          merged_bstate->add_alloc_state(alloc0, vs0->clone());
-        } else {
-          // Otherwise, creates Phi nodes for these fields
-          merge_fields(pred_bstates, merged_bstate, node);
-        }
+        merge_fields(pred_bstates, merged_bstate, node);
       }
     }
 
@@ -558,6 +562,7 @@ void PhasePartialEA::do_analysis() {
   log_info(partialea)("Start Partial Escape Analysis for %s", C->method()->name()->as_utf8());
 
   PhaseSimpleCFG cfg(C, _igvn);
+  _cfg = & cfg;
 #ifdef ASSERT
   if (DumpCFGDuringPEA) {
     cfg.dump();

@@ -211,6 +211,8 @@ private:
   RegionNode* get_merge_point() { return _merge_point; }
 
 private:
+  PhiNode* create_phi_for_field(GrowableArray<BlockState*>* pred_bstates, VirtualAllocNode* valloc,
+                                Node* field, int field_idx);
   void materialize(VirtualAllocNode* valloc, BlockState* bstate, bool* has_materialization);
   void merge_phi(GrowableArray<BlockState*>* pred_bstates, BlockState* merged_bstate,
                  PhiNode* phi, bool* has_materialization);

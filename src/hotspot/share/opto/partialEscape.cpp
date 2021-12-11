@@ -94,7 +94,7 @@ void EscapedState::dump() const {
 
 void VirtualState::dump() const {
   for (int i = 0; i < _entries_cnt; i++) {
-    tty->print("Field %d : ", i);
+    tty->print(" F%d : ", i);
     const Node* n = _entries[i];
     if (n == NULL) {
       tty->print_cr(" NULL");
@@ -182,6 +182,39 @@ void PhasePartialEA::materialize(VirtualAllocNode* valloc, BlockState* bstate, b
   }
 }
 
+// Find all nth fields from predecessor block state, wire them into newly created PhiNode
+PhiNode* PhasePartialEA::create_phi_for_field(GrowableArray<BlockState*>* pred_bstates, VirtualAllocNode* valloc,
+                                              Node* field, int field_idx) {
+  assert(pred_bstates->length() >= 2, "must be");
+#ifdef ASSERT
+  bool identical = true;
+#endif
+  int phi_idx = 1;
+  const Type* phi_type = field != NULL ? field->bottom_type() : Type::BOTTOM;
+  //fixme:meet field and others
+  PhiNode* phi = new PhiNode(get_merge_point(), phi_type);
+  phi->init_req(phi_idx++, field);
+  for (int pred_i = 1; pred_i < pred_bstates->length(); pred_i++) {
+    VirtualState* vs_tmp = pred_bstates->at(pred_i)->get_alloc_state(valloc)->as_VirtualState();
+    Node* field_tmp = vs_tmp->get_field(field_idx);
+    // TODO: if field_tmp == NULL, it means this field is not initialized, I think we 
+    // should use default node instead of null, i.e. Con(1) for int field, Con(1.0) for double,
+    phi->init_req(phi_idx++, field_tmp);
+#ifdef ASSERT
+    if (field != field_tmp) {
+      identical = false;
+    }
+#endif
+  }
+  _igvn->register_new_node_with_optimizer(phi);
+#ifdef ASSERT
+  if (identical) {
+    assert(false, "all fields in predecessor are same, why merging?");
+  }
+#endif
+  return phi;
+}
+
 // If some field values differ, creates a new Phi node for this field. If a field
 // that should be merged references a virtual object (i.e., a VirtualAlloc node with
 // a VirtualState), this object needs to be materialized before merging.
@@ -209,24 +242,7 @@ void PhasePartialEA::merge_fields(GrowableArray<BlockState*>* pred_bstates, Bloc
     }
     // Otherwise, this field is different in some predecessor,
     // create a phi node to merge these different nodes
-    int phi_idx = 1;
-    const Type* phi_type = field != NULL ? field->bottom_type() : Type::BOTTOM;
-    //fixme:meet field and others
-    PhiNode* phi = new PhiNode(get_merge_point(), phi_type);
-    phi->init_req(phi_idx++, field);
-    for (int pred_i = 1; pred_i < pred_bstates->length(); pred_i++) {
-      Node *alloc_tmp = pred_bstates->at(pred_i)->get_alias(alias_key_node);
-#ifdef ASSERT
-      assert(alloc_tmp == alloc0, "must be");
-#endif
-      VirtualState* vs_tmp = pred_bstates->at(pred_i)->get_alloc_state(alloc0)->as_VirtualState();
-      Node* field_tmp = vs_tmp->get_field(field_i);
-      // TODO: if field_tmp == NULL, it means this field is not initialized, I think we 
-      // should use default node instead of null, i.e. Con(1) for int field, Con(1.0) for double,
-      phi->init_req(phi_idx++, field_tmp);
-    }
-    _igvn->register_new_node_with_optimizer(phi);
-    // Use newly created Phi in new VirtualState
+    PhiNode* phi = create_phi_for_field(pred_bstates, alloc0, field, field_i);
     merged_vs->set_field(field_i, phi);
   }
   // All fields were processed, add alias and merged virtual state into block state

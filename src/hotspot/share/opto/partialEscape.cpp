@@ -46,6 +46,7 @@ BlockState::BlockState() : _aliases(new Dict(cmpkey, hashkey)),
 #ifdef ASSERT
   _cfg = NULL;
   _block = NULL;
+  _changed = false;
 #endif 
 }
 
@@ -55,6 +56,7 @@ BlockState::BlockState(Block* block) : _aliases(new Dict(cmpkey, hashkey)),
   assert(block != NULL, "must be");
   _cfg = NULL;
   _block = block;
+  _changed = false;
 #endif
 }
 
@@ -65,6 +67,7 @@ BlockState::BlockState(PhaseSimpleCFG* cfg, Block* block) : _aliases(new Dict(cm
   assert(block != NULL, "must be");
   _cfg = cfg;
   _block = block;
+  _changed = false;
 #endif
 }
 
@@ -124,34 +127,37 @@ void BlockState::dump() {
   } else {
     tty->print_cr("===BlockState(" INTPTR_FORMAT ")===", p2i(this));
   }
-  tty->print_cr("Alias -> VirtualAlloc:");
-  for (AliasStateIter iter(this->_aliases); iter.has_next(); iter.next()) {
-    const Node* key = iter.key();
-    const Node* value = iter.value();
-    if (key != NULL) {
-      key->dump();
-    } else {
-      tty->print_cr("NULL_KEY");
+  if (_changed || Verbose || WizardMode) {
+    // Ignore BlockState detailed content if nothing changed after inherted from last block state
+    tty->print_cr("Alias -> VirtualAlloc:");
+    for (AliasStateIter iter(this->_aliases); iter.has_next(); iter.next()) {
+      const Node* key = iter.key();
+      const Node* value = iter.value();
+      if (key != NULL) {
+        key->dump();
+      } else {
+        tty->print_cr("NULL_KEY");
+      }
+      if (value != NULL) {
+        value->dump();
+      } else {
+        tty->print_cr("NULL_VALUE");
+      }
     }
-    if (value != NULL) {
-      value->dump();
-    } else {
-      tty->print_cr("NULL_VALUE");
-    }
-  }
-  tty->print_cr("VirtualAlloc -> AllocState:");
-  for (AllocStateIter iter(this->_alloc_states); iter.has_next(); iter.next()) {
-    const VirtualAllocNode* key = iter.key();
-    const AllocState* value = iter.value();
-    if (key != NULL) {
-      key->dump();
-    } else {
-      tty->print_cr("NULL_KEY");
-    }
-    if (value != NULL) {
-      value->dump();
-    } else {
-      tty->print_cr("NULL_VALUE");
+    tty->print_cr("VirtualAlloc -> AllocState:");
+    for (AllocStateIter iter(this->_alloc_states); iter.has_next(); iter.next()) {
+      const VirtualAllocNode* key = iter.key();
+      const AllocState* value = iter.value();
+      if (key != NULL) {
+        key->dump();
+      } else {
+        tty->print_cr("NULL_KEY");
+      }
+      if (value != NULL) {
+        value->dump();
+      } else {
+        tty->print_cr("NULL_VALUE");
+      }
     }
   }
 }
@@ -199,16 +205,20 @@ PhiNode* PhasePartialEA::create_phi_for_field(GrowableArray<BlockState*>* pred_b
   bool identical = true;
 #endif
   int phi_idx = 1;
-  const Type* phi_type = field != NULL ? field->bottom_type() : Type::BOTTOM;
+  const Type* phi_type = field != NULL ? _igvn->type(field) : Type::BOTTOM;
   //fixme:meet field and others
   PhiNode* phi = new PhiNode(get_merge_point(), phi_type);
-  phi->init_req(phi_idx++, field);
+  phi->init_req(phi_idx++, field != NULL ? field : C->top());
   for (int pred_i = 1; pred_i < pred_bstates->length(); pred_i++) {
     VirtualState* vs_tmp = pred_bstates->at(pred_i)->get_alloc_state(valloc)->as_VirtualState();
     Node* field_tmp = vs_tmp->get_field(field_idx);
     // TODO: if field_tmp == NULL, it means this field is not initialized, I think we 
     // should use default node instead of null, i.e. Con(1) for int field, Con(1.0) for double,
-    phi->init_req(phi_idx++, field_tmp);
+    if (field_tmp == NULL) {
+      phi->init_req(phi_idx++, C->top());
+    } else {
+      phi->init_req(phi_idx++, field_tmp);
+    }
 #ifdef ASSERT
     if (field != field_tmp) {
       identical = false;
@@ -506,6 +516,7 @@ void PhasePartialEA::do_node(BlockState* bstate, Node* n) {
       VirtualAllocNode* alloc = new VirtualAllocNode(n, klass);
       bstate->add_alloc_state(alloc, alloc_st);
       bstate->add_alias(n, alloc);
+      _igvn->register_new_node_with_optimizer(alloc);
       _has_allocation = true;
       break;
     }
@@ -519,6 +530,7 @@ void PhasePartialEA::do_node(BlockState* bstate, Node* n) {
         const TypeKlassPtr* klass_ptrtype = _igvn->type(n->as_AllocateArray()->in(AllocateNode::KlassNode))->is_klassptr();
         VirtualState* alloc_st = new (C->comp_arena()) VirtualState(arr_len_t->get_con());
         VirtualAllocNode* alloc = new VirtualAllocNode(n, klass_ptrtype->klass());
+        _igvn->register_new_node_with_optimizer(alloc);
         bstate->add_alloc_state(alloc, alloc_st);
         bstate->add_alias(n, alloc);
       } else {
@@ -661,6 +673,7 @@ void PhasePartialEA::do_analysis() {
           assert(b->_succs[0] != NULL, "sanity check");
           assert(bstate != NULL, " propagate null block state to successor");
           if (!has_block_state(b->_succs[0])) {
+            NOT_PRODUCT( bstate->set_changed(false); )
             add_block_state(b->_succs[0], bstate); // Associate block state even if the block is not visited yet
           }
           queue.push_back(b->_succs[0]);

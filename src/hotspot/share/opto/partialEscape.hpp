@@ -26,6 +26,8 @@ public:
     init_class_id(Class_VirtualAlloc);
   }
 
+  virtual const Type *bottom_type() const { return Type::BOTTOM; }
+
   virtual int Opcode() const;
   ciKlass* get_klass() { return _klass; }
 };
@@ -133,6 +135,8 @@ private:
   PhaseSimpleCFG* _cfg;
   // Associated basic block
   Block* _block;
+  // Changed comparing to inherited BlockState
+  bool _changed;
 #endif
   // Aliases to the same allocation site
   Dict* _aliases; 
@@ -153,15 +157,18 @@ public:
     return (Node*)_aliases->operator[]((void*)key);
   }
   void add_alloc_state(VirtualAllocNode* key, AllocState* value) {
+    NOT_PRODUCT(_changed = true; )
     _alloc_states->Insert(key, value);
   }
   void del_alloc_state(VirtualAllocNode* key) {
+    NOT_PRODUCT(_changed = true; )
     _alloc_states->Delete(key);
   }
   AllocState* get_alloc_state(const VirtualAllocNode* key) {
     return (AllocState*)_alloc_states->operator[]((void*)key);
   }
   void add_effect(IREffect* effect) {
+    NOT_PRODUCT(_changed = true; )
     _effects.push(effect);
   }
 
@@ -171,6 +178,7 @@ public:
   BlockState* clone();
 
 #ifndef PRODUCT
+  void set_changed(bool changed) { _changed = changed;}
   void set_block(Block* block) { _block = block; }
   void set_cfg(PhaseSimpleCFG* cfg) { _cfg = cfg; }
   void dump();

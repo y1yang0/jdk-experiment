@@ -12,6 +12,26 @@
 #include "gc/shared/c2/barrierSetC2.hpp"
 #include "opto/partialEscape.hpp"
 
+// Utilities methods to facilitate use of Dict structure
+// Used to iterate _aliases and _alloc_states, e.g.
+// for (AliasStateIter iter(_aliases); iter.has_next(); iter.next()) {
+//   ... = iter.key();
+//   ... = iter.value();
+// }
+//
+template<typename K, typename V>
+class StateIter : public DictI {
+public:
+  StateIter(Dict* d) : DictI(d) {}
+  bool has_next() { return test(); }
+  void next()     { this->operator++(); }
+  K key()         { return (K)this->_key; }
+  V value()       { return (V)this->_value; }
+};
+
+using AliasStateIter = StateIter<Node*, Node*>;
+using AllocStateIter = StateIter<VirtualAllocNode*, AllocState*>;
+
 VirtualState* VirtualState::clone() {
   VirtualState* new_st = new VirtualState(this->_entries_cnt);
   for (int i = 0; i < this->_entries_cnt; i++) {
@@ -41,7 +61,7 @@ EscapedState* EscapedState::clone() {
   return new_st;
 }
 
-BlockState::BlockState() : _aliases(new Dict(cmpkey, hashkey)),
+BlockState::BlockState() :
   _alloc_states(new Dict(cmpkey, hashkey)) {
 #ifdef ASSERT
   _cfg = NULL;
@@ -50,7 +70,7 @@ BlockState::BlockState() : _aliases(new Dict(cmpkey, hashkey)),
 #endif 
 }
 
-BlockState::BlockState(Block* block) : _aliases(new Dict(cmpkey, hashkey)),
+BlockState::BlockState(Block* block) :
   _alloc_states(new Dict(cmpkey, hashkey)) {
 #ifdef ASSERT
   assert(block != NULL, "must be");
@@ -60,7 +80,7 @@ BlockState::BlockState(Block* block) : _aliases(new Dict(cmpkey, hashkey)),
 #endif
 }
 
-BlockState::BlockState(PhaseSimpleCFG* cfg, Block* block) : _aliases(new Dict(cmpkey, hashkey)),
+BlockState::BlockState(PhaseSimpleCFG* cfg, Block* block) :
   _alloc_states(new Dict(cmpkey, hashkey)) {
 #ifdef ASSERT
   assert(cfg != NULL, "must be");
@@ -73,21 +93,14 @@ BlockState::BlockState(PhaseSimpleCFG* cfg, Block* block) : _aliases(new Dict(cm
 
 BlockState* BlockState::clone() {
   BlockState* bs = new BlockState();
-  for (AliasStateIter iter(this->_aliases); iter.has_next(); iter.next()) {
-    Node* key = iter.key();
-    Node* value = iter.value();
-    bs->add_alias(key, value);
-  }
   for (AllocStateIter iter(this->_alloc_states); iter.has_next(); iter.next()) {
     VirtualAllocNode* key = iter.key();
     AllocState* value = iter.value();
     bs->add_alloc_state(key, value->clone());
   }
-  assert(bs->_aliases->Size() == this->_aliases->Size(), "clone is incomplete");
   assert(bs->_alloc_states->Size() == this->_alloc_states->Size(), "clone is incomplete");
   return bs;
 }
-
 
 #ifndef PRODUCT
 void EscapedState::dump() const {
@@ -104,6 +117,15 @@ void VirtualState::dump() const {
     } else {
       n->dump();
     }
+  }
+}
+
+void BlockState::verify() {
+  for (AllocStateIter iter(_alloc_states); iter.has_next(); iter.next()) {
+    VirtualAllocNode* key = iter.key();
+    AllocState* value = iter.value();
+    assert(key != NULL, "must be");
+    assert(value != NULL, "must be");
   }
 }
 
@@ -129,22 +151,6 @@ void BlockState::dump() {
   }
   if (_changed || Verbose || WizardMode) {
     // Ignore BlockState detailed content if nothing changed after inherted from last block state
-    tty->print_cr("Alias -> VirtualAlloc:");
-    for (AliasStateIter iter(this->_aliases); iter.has_next(); iter.next()) {
-      const Node* key = iter.key();
-      const Node* value = iter.value();
-      if (key != NULL) {
-        key->dump();
-      } else {
-        tty->print_cr("NULL_KEY");
-      }
-      if (value != NULL) {
-        value->dump();
-      } else {
-        tty->print_cr("NULL_VALUE");
-      }
-    }
-    tty->print_cr("VirtualAlloc -> AllocState:");
     for (AllocStateIter iter(this->_alloc_states); iter.has_next(); iter.next()) {
       const VirtualAllocNode* key = iter.key();
       const AllocState* value = iter.value();
@@ -168,7 +174,8 @@ PhasePartialEA::PhasePartialEA(PhaseIterGVN *igvn) :
   _cfg(NULL),
   _igvn(igvn),
   _merge_point(NULL),
-  _has_allocation(false) {
+  _has_allocation(false),
+  _aliases(new Dict(cmpkey, hashkey)) {
   assert(DoPartialEscapeAnalysis, "insane");
 }
 
@@ -235,17 +242,15 @@ PhiNode* PhasePartialEA::create_phi_for_field(GrowableArray<BlockState*>* pred_b
 }
 
 // Merge multi VirtualStates with the same VirtualAllocNode
-void PhasePartialEA::merge_fields(GrowableArray<BlockState*>* pred_bstates, BlockState* merged_bstate, Node* alias_key_node) {
-  VirtualAllocNode* alloc0 = pred_bstates->at(0)->get_alias(alias_key_node)->as_VirtualAlloc();
-  VirtualState* vs0 = pred_bstates->at(0)->get_alloc_state(alloc0)->as_VirtualState();
+void PhasePartialEA::merge_fields(GrowableArray<BlockState*>* pred_bstates, BlockState* merged_bstate, VirtualAllocNode* valloc) {
+  assert(pred_bstates->length() >= 2, "must be");
+  assert(merged_bstate != NULL, "merged BlockState is not created yet");
+  assert(valloc != NULL, "invalid VirtualAllocNode");
+  VirtualState* vs0 = pred_bstates->at(0)->get_alloc_state(valloc)->as_VirtualState();
 
   bool all_identical = true;
   for (int j = 1; j < pred_bstates->length(); j++) {
-    Node* alloc_tmp = pred_bstates->at(j)->get_alias(alias_key_node);
-#ifdef ASSERT
-    assert(alloc_tmp == alloc0, "must be");
-#endif
-    VirtualState* vs_tmp = pred_bstates->at(j)->get_alloc_state(alloc0)->as_VirtualState();
+    VirtualState* vs_tmp = pred_bstates->at(j)->get_alloc_state(valloc)->as_VirtualState();
     if (!vs_tmp->equals(vs0)) {
       all_identical = false;
       break;
@@ -255,8 +260,7 @@ void PhasePartialEA::merge_fields(GrowableArray<BlockState*>* pred_bstates, Bloc
   // If all field values are identical, this value will be the value of the field in
   // the new VirtualState.
   if (all_identical) {
-    merged_bstate->add_alias(alias_key_node, alloc0);
-    merged_bstate->add_alloc_state(alloc0, vs0->clone());
+    merged_bstate->add_alloc_state(valloc, vs0->clone());
     return;
   }
 
@@ -269,7 +273,7 @@ void PhasePartialEA::merge_fields(GrowableArray<BlockState*>* pred_bstates, Bloc
 
     bool same_field = true;
     for (int pred_i = 1; pred_i < pred_bstates->length(); pred_i++) {
-      VirtualState* vs_tmp = pred_bstates->at(pred_i)->get_alloc_state(alloc0)->as_VirtualState();
+      VirtualState* vs_tmp = pred_bstates->at(pred_i)->get_alloc_state(valloc)->as_VirtualState();
       Node* pred_field = vs_tmp->get_field(field_i);
       if (pred_field != field) {
         same_field = false;
@@ -280,7 +284,7 @@ void PhasePartialEA::merge_fields(GrowableArray<BlockState*>* pred_bstates, Bloc
     if (same_field) {
       // Same fields, but refer to another VirtualAlloc, apply merge_fields recursively
       if (field != NULL && field->isa_VirtualAlloc()) {
-        merge_fields(pred_bstates, merged_bstate, field);
+        merge_fields(pred_bstates, merged_bstate, field->as_VirtualAlloc());
       }
       // Same trivial fields, that's pretty fine, the merged field will not change
       merged_vs->set_field(field_i, field);
@@ -288,12 +292,11 @@ void PhasePartialEA::merge_fields(GrowableArray<BlockState*>* pred_bstates, Bloc
     }
     // Otherwise, this field is different in some predecessor,
     // create a phi node to merge these different nodes
-    PhiNode* phi = create_phi_for_field(pred_bstates, alloc0, field, field_i);
+    PhiNode* phi = create_phi_for_field(pred_bstates, valloc, field, field_i);
     merged_vs->set_field(field_i, phi);
   }
-  // All fields were processed, add alias and merged virtual state into block state
-  merged_bstate->add_alias(alias_key_node, alloc0);
-  merged_bstate->add_alloc_state(alloc0, merged_vs);
+  // All fields were processed, add merged virtual state into block state
+  merged_bstate->add_alloc_state(valloc, merged_vs);
 }
 
 void PhasePartialEA::merge_phi(GrowableArray<BlockState*>* pred_bstates, BlockState* merged_bstate,
@@ -304,7 +307,7 @@ void PhasePartialEA::merge_phi(GrowableArray<BlockState*>* pred_bstates, BlockSt
   // First iteration, check if all inputs of Phi are aliased to the same VirtualAllocNode
   for (uint i = PhiNode::Input; i < phi->req(); i++) {
     Node* in = phi->in(i);
-    Node* alias = pred_bstates->at(i - PhiNode::Input)->get_alias(in);
+    Node* alias = get_alias(in);
     if (alias != NULL && alias->isa_VirtualAlloc()) {
       if (identical_virt == NULL) {
         identical_virt = alias->as_VirtualAlloc();
@@ -317,12 +320,12 @@ void PhasePartialEA::merge_phi(GrowableArray<BlockState*>* pred_bstates, BlockSt
     }
   }
   if (all_identical && identical_virt != NULL) {
-    merged_bstate->add_alias(phi, identical_virt);
+    add_alias(phi, identical_virt);
   } else {
     // either some inputs are virtual, or escape
    for (uint j = PhiNode::Input; j < phi->req(); j++) {
       Node* in = phi->in(j);
-      Node* alias = pred_bstates->at(j - PhiNode::Input)->get_alias(in);
+      Node* alias = get_alias(in);
       if (alias != NULL && alias->isa_VirtualAlloc()) {
         AllocState* st = pred_bstates->at(j - PhiNode::Input)->get_alloc_state(alias->as_VirtualAlloc());
         if (st->is_escaped_state()) {
@@ -342,22 +345,21 @@ BlockState* PhasePartialEA::merge_block_states(GrowableArray<BlockState*>* pred_
   assert(pred_bstates->length() >= 2, "sanity check");
   assert(get_merge_point() != NULL, "merge point node is not set");
 
-  // Create intersection of alias nodes, VirtualAllocNode alives only if it exists
-  // in all predecessors and has at least one common alias
-  GrowableArray<Node*> alias_intersect;
+  // Create intersection of VirtualAllocNode that exists in all predecessors and has at least one common alias
+  GrowableArray<VirtualAllocNode*> valloc_intersect;
   BlockState* bs = pred_bstates->at(0);
-  for (AliasStateIter iter(bs->get_aliases()); iter.has_next(); iter.next()) {
-    Node* key_node = iter.key();
+  for (AllocStateIter iter(bs->get_alloc_states()); iter.has_next(); iter.next()) {
+    VirtualAllocNode* key_node = iter.key();
     bool all_exist = true;
     for (int k = 1; k < pred_bstates->length(); k++) {
-      Node* value_node = pred_bstates->at(k)->get_alias(key_node);
-      if (value_node == NULL || !value_node->isa_VirtualAlloc()) { // alias is not exist
+      AllocState* st = pred_bstates->at(k)->get_alloc_state(key_node);
+      if (st == NULL) { // VirtualAlloc is not exist
         all_exist = false;
         break;
       }
     }
     if (all_exist) {
-      alias_intersect.append(key_node);
+      valloc_intersect.append(key_node);
     }
   }
   // For each alias node, get corresponding VirtualAllocNode, looks at related
@@ -371,12 +373,11 @@ BlockState* PhasePartialEA::merge_block_states(GrowableArray<BlockState*>* pred_
   bool has_materialization = false;
   BlockState* merged_bstate = new BlockState();
   do { // Run until meeting the fix point - no more materialization happens
-    for (int i = 0; i < alias_intersect.length(); i++) {
-      Node* node = alias_intersect.at(i);
+    for (int i = 0; i < valloc_intersect.length(); i++) {
+      VirtualAllocNode* valloc = valloc_intersect.at(i);
       int escaped_cnt = 0;
       for (int k = 0; k < pred_bstates->length(); k++) {
-        VirtualAllocNode* alloc_node = pred_bstates->at(k)->get_alias(node)->as_VirtualAlloc();
-        AllocState* st  = pred_bstates->at(k)->get_alloc_state(alloc_node);
+        AllocState* st  = pred_bstates->at(k)->get_alloc_state(valloc);
         if (st->is_escaped_state()) {
           escaped_cnt++;
         }
@@ -389,7 +390,7 @@ BlockState* PhasePartialEA::merge_block_states(GrowableArray<BlockState*>* pred_
         assert(false, "not implement");
       } else {
         // Not escaped in all predecessors
-        merge_fields(pred_bstates, merged_bstate, node);
+        merge_fields(pred_bstates, merged_bstate, valloc);
       }
     }
 
@@ -409,22 +410,8 @@ BlockState* PhasePartialEA::merge_block_states(GrowableArray<BlockState*>* pred_
     }
   } while(has_materialization);
 
-#ifdef ASSERT
   // Verify correctness of merged block state
-  assert(merged_bstate->get_aliases()->Size() >= (uint)alias_intersect.length(), "new graph state is incomplete");
-  for (AliasStateIter iter(merged_bstate->get_aliases()); iter.has_next(); iter.next()) {
-    Node* key = iter.key();
-    VirtualAllocNode* value = iter.value()->as_VirtualAlloc();
-    assert(key != NULL, "must be");
-    assert(value != NULL, "must be");
-  }
-  for (AllocStateIter iter(merged_bstate->get_alloc_states()); iter.has_next(); iter.next()) {
-    VirtualAllocNode* key = iter.key();
-    AllocState* value = iter.value();
-    assert(key != NULL, "must be");
-    assert(value != NULL, "must be");
-  }
-#endif
+  NOT_PRODUCT( merged_bstate->verify(); )
   return merged_bstate;
 }
 
@@ -450,12 +437,12 @@ void PhasePartialEA::do_store(BlockState* bstate, Node* n) {
       ciField* field = klass->get_field_by_offset(off, false);
       int nth = klass->nonstatic_field_nth(field);
 
-      Node* alloc_alias = bstate->get_alias(alloc);
+      Node* alloc_alias = get_alias(alloc);
       if (alloc_alias->isa_VirtualAlloc()) {
         AllocState* alloc_st = bstate->get_alloc_state(alloc_alias->as_VirtualAlloc());
         assert(alloc_st->is_virtual_state(), "why not");
         Node* rhs = n->in(MemNode::ValueIn);
-        Node* rhs_valloc = bstate->get_alias(rhs);
+        Node* rhs_valloc = get_alias(rhs);
         if (rhs_valloc != NULL && rhs_valloc->isa_VirtualAlloc()) {
           alloc_st->as_VirtualState()->set_field(nth, rhs_valloc);
         } else {
@@ -490,12 +477,12 @@ void PhasePartialEA::do_load(BlockState* bstate, Node* n) {
       ciField* field = klass->get_field_by_offset(off, false);
       int nth = klass->nonstatic_field_nth(field);
 
-      Node* alloc_alias = bstate->get_alias(alloc);
+      Node* alloc_alias = get_alias(alloc);
       if(alloc_alias->isa_VirtualAlloc()) {
         AllocState* alloc_st = bstate->get_alloc_state(alloc_alias->as_VirtualAlloc());
         assert(alloc_st->is_virtual_state(), "why not");
         Node* nf = alloc_st->as_VirtualState()->get_field(nth);
-        bstate->add_alias(n, nf);
+        add_alias(n, nf);
         // todo: delete current node
         bstate->add_effect(NULL);
       } else {
@@ -515,7 +502,7 @@ void PhasePartialEA::do_node(BlockState* bstate, Node* n) {
       VirtualState* alloc_st = new (C->comp_arena()) VirtualState(nof_fields);
       VirtualAllocNode* alloc = new VirtualAllocNode(n, klass);
       bstate->add_alloc_state(alloc, alloc_st);
-      bstate->add_alias(n, alloc);
+      add_alias(n, alloc);
       _igvn->register_new_node_with_optimizer(alloc);
       _has_allocation = true;
       break;
@@ -532,7 +519,7 @@ void PhasePartialEA::do_node(BlockState* bstate, Node* n) {
         VirtualAllocNode* alloc = new VirtualAllocNode(n, klass_ptrtype->klass());
         _igvn->register_new_node_with_optimizer(alloc);
         bstate->add_alloc_state(alloc, alloc_st);
-        bstate->add_alias(n, alloc);
+        add_alias(n, alloc);
       } else {
         // materialization
       }
@@ -543,8 +530,8 @@ void PhasePartialEA::do_node(BlockState* bstate, Node* n) {
       Node* in = n->in(0);
       // rawoop proj of allocation
       if (in->isa_Allocate() && n->as_Proj()->_con == TypeFunc::Parms) {
-        VirtualAllocNode* valloc = bstate->get_alias(in)->as_VirtualAlloc();
-        bstate->add_alias(n, valloc);
+        VirtualAllocNode* valloc = get_alias(in)->as_VirtualAlloc();
+        add_alias(n, valloc);
       }
       break;
     }
@@ -552,16 +539,16 @@ void PhasePartialEA::do_node(BlockState* bstate, Node* n) {
       Node* oop_in = n->in(1);
       // javaoop of allocation
       if (oop_in->isa_Proj() && oop_in->as_Proj()->_con == TypeFunc::Parms) {
-        VirtualAllocNode* valloc = bstate->get_alias(oop_in)->as_VirtualAlloc();
-        bstate->add_alias(n, valloc);
+        VirtualAllocNode* valloc = get_alias(oop_in)->as_VirtualAlloc();
+        add_alias(n, valloc);
       }
       break;
     }
     case Op_EncodeP: {
       Node* narrow_oop_in = n->in(1);
       if (narrow_oop_in->isa_CheckCastPP()) {
-        VirtualAllocNode* valloc = bstate->get_alias(narrow_oop_in)->as_VirtualAlloc();
-        bstate->add_alias(n, valloc);
+        VirtualAllocNode* valloc = get_alias(narrow_oop_in)->as_VirtualAlloc();
+        add_alias(n, valloc);
       }
       break;
     }
@@ -700,20 +687,36 @@ void PhasePartialEA::do_analysis() {
       }
     }
   }
-#ifdef ASSERT
+#ifndef PRODUCT
+  if (TracePartialEscapeAnalysis) {
+    tty->print_cr("===Alias Mapping===");
+    for (AliasStateIter iter(this->_aliases); iter.has_next(); iter.next()) {
+      const Node* key = iter.key();
+      const Node* value = iter.value();
+      key->dump();
+      value->dump();
+      tty->print_cr("");
+    }
+  }
+#endif
   assert(cfg.number_of_blocks() == visited._cnt, "some blocks are not visited yet");
-  visited.reset();
-  queue.reset();
-  queue.push_back(cfg.get_root_block());
+  verify_block_states();
+}
+
+void PhasePartialEA::verify_block_states() {
+  Block_List visited;
+  Block_Queue queue;
+  queue.push_back(_cfg->get_root_block());
   while (!queue.is_empty()) {
-    Block *b = queue.pop_front();
+    Block* b = queue.pop_front();
     if (!visited.contains(b)) {
       visited.push(b);
-      assert(get_block_state(b) != NULL, "all block should have associate BlockState");
+      BlockState* bstate = get_block_state(b);
+      assert(bstate != NULL, "all blocks should have associate BlockState");
+      bstate->verify();
       for (uint i = 0; i < b->_num_succs; i++) {
         queue.push_back(b->_succs[i]);
       }
     }
   }
-#endif
 }

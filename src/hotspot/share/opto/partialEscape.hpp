@@ -96,25 +96,6 @@ public:
 #endif
 };
 
-// Used to iterate _aliases and _alloc_states, e.g.
-// for (AliasStateIter iter(_aliases); iter.has_next(); iter.next()) {
-//   ... = iter.key();
-//   ... = iter.value();
-// }
-//
-template<typename K, typename V>
-class StateIter : public DictI {
-public:
-  StateIter(Dict* d) : DictI(d) {}
-  bool has_next() { return test(); }
-  void next()     { this->operator++(); }
-  K key()         { return (K)this->_key; }
-  V value()       { return (V)this->_value; }
-};
-
-using AliasStateIter = StateIter<Node*, Node*>;
-using AllocStateIter = StateIter<VirtualAllocNode*, AllocState*>;
-
 class IREffect {
 #ifdef ASSERT
   const char * _name;
@@ -138,8 +119,6 @@ private:
   // Changed comparing to inherited BlockState
   bool _changed;
 #endif
-  // Aliases to the same allocation site
-  Dict* _aliases; 
   // Related object state for the virtual allocation node
   Dict* _alloc_states;
   // Effect list
@@ -150,12 +129,6 @@ public:
   BlockState(Block* block);
   BlockState(PhaseSimpleCFG* cfg, Block* block);
 
-  void add_alias(Node* key, Node* value) {
-    _aliases->Insert(key, value);
-  }
-  Node* get_alias(const Node* key) {
-    return (Node*)_aliases->operator[]((void*)key);
-  }
   void add_alloc_state(VirtualAllocNode* key, AllocState* value) {
     NOT_PRODUCT(_changed = true; )
     _alloc_states->Insert(key, value);
@@ -172,7 +145,6 @@ public:
     _effects.push(effect);
   }
 
-  Dict* get_aliases() { return _aliases; }
   Dict* get_alloc_states() { return _alloc_states; }
 
   BlockState* clone();
@@ -181,6 +153,7 @@ public:
   void set_changed(bool changed) { _changed = changed;}
   void set_block(Block* block) { _block = block; }
   void set_cfg(PhaseSimpleCFG* cfg) { _cfg = cfg; }
+  void verify();
   void dump();
 #endif
 };
@@ -192,8 +165,16 @@ private:
   ResourceHashtable<uint, BlockState*> _block_states;
   RegionNode* _merge_point;
   bool _has_allocation;
+  Dict* _aliases; 
 
 private:
+  Dict* get_aliases() { return _aliases; }
+    void add_alias(Node* key, Node* value) {
+    _aliases->Insert(key, value);
+  }
+  Node* get_alias(const Node* key) {
+    return (Node*)_aliases->operator[]((void*)key);
+  }
   void add_block_state(Block* block, BlockState* bstate) {
     bool added = _block_states.put(block->head()->_idx, bstate);
     assert(added == true, "BlockState is already exist");
@@ -220,13 +201,15 @@ private:
   RegionNode* get_merge_point() { return _merge_point; }
 
 private:
+  void verify_block_states();
+
   PhiNode* create_phi_for_field(GrowableArray<BlockState*>* pred_bstates, VirtualAllocNode* valloc,
                                 Node* field, int field_idx);
   void materialize(VirtualAllocNode* valloc, BlockState* bstate, bool* has_materialization);
   void merge_phi(GrowableArray<BlockState*>* pred_bstates, BlockState* merged_bstate,
                  PhiNode* phi, bool* has_materialization);
   void merge_fields(GrowableArray<BlockState*>* pred_bstates, BlockState* merged_bstate,
-                    Node* alias_key_node);
+                    VirtualAllocNode* valloc);
   BlockState* merge_block_states(GrowableArray<BlockState*>* bstates);
 
 public:

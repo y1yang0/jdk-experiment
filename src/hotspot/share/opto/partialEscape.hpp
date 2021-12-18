@@ -96,12 +96,12 @@ public:
 #endif
 };
 
-class IREffect {
+class GraphEffect {
 #ifdef ASSERT
   const char * _name;
 #endif
 public:
-  IREffect(const char* name) {
+  GraphEffect(const char* name) {
 #ifdef ASSERT
     _name = name;
 #endif  
@@ -122,7 +122,7 @@ private:
   // Related object state for the virtual allocation node
   Dict* _alloc_states;
   // Effect list
-  GrowableArray<IREffect*> _effects;
+  GrowableArray<GraphEffect*> _effects;
 
 public:
   BlockState();
@@ -140,7 +140,7 @@ public:
   AllocState* get_alloc_state(const VirtualAllocNode* key) {
     return (AllocState*)_alloc_states->operator[]((void*)key);
   }
-  void add_effect(IREffect* effect) {
+  void add_effect(GraphEffect* effect) {
     NOT_PRODUCT(_changed = true; )
     _effects.push(effect);
   }

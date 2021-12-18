@@ -685,6 +685,9 @@ void PhasePartialEA::do_analysis() {
         assert(!visited.contains(b), "delayed block was already visited");
         queue.push_back(b);
       }
+    } else {
+      // Skip visited block...
+      assert(get_block_state(b) != NULL, "missing BlockState");
     }
   }
 #ifndef PRODUCT

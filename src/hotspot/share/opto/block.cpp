@@ -1371,6 +1371,11 @@ PhaseSimpleCFG::PhaseSimpleCFG(Compile* C, PhaseIterGVN* igvn) :
     C->record_method_not_compilable("can not build domtree");
     assert(false, "www");
   }
+
+  // Create the loop tree and calculate loop depth.
+  _root_loop = create_loop_tree();
+  _root_loop->compute_loop_depth(0);
+
   NOT_PRODUCT(C->verify_graph_edges();)
   schedule_nodes();
 }

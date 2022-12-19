@@ -69,7 +69,7 @@ public abstract class HotSpotVirtualMachine extends VirtualMachine {
         int pid;
         try {
             pid = Integer.parseInt(id);
-        } catch (NumberFormatException e) {
+        } catch (NumberFormatException x) {
             throw new AttachNotSupportedException("Invalid process identifier");
         }
 
@@ -366,6 +366,85 @@ public abstract class HotSpotVirtualMachine extends VirtualMachine {
         return message.toString();
     }
 
+    void processCompletionStatus(IOException ioe, InputStream sis) throws AgentLoadException, IOException {
+        // Read the command completion status
+        int completionStatus;
+        try {
+            completionStatus = readInt(sis);
+        } catch (IOException x) {
+            sis.close();
+            if (ioe != null) {
+                throw ioe;
+            } else {
+                throw x;
+            }
+        }
+        if (completionStatus != 0) {
+            // read from the stream and use that as the error message
+            String message = readErrorMessage(sis);
+            sis.close();
+
+            // In the event of a protocol mismatch then the target VM
+            // returns a known error so that we can throw a reasonable
+            // error.
+            if (completionStatus == ATTACH_ERROR_BADVERSION) {
+                throw new IOException("Protocol mismatch with target VM");
+            }
+
+            // Special-case the "load" command so that the right exception is
+            // thrown.
+            if (cmd.equals("load")) {
+                String msg = "Failed to load agent library";
+                if (!message.isEmpty())
+                    msg += ": " + message;
+                throw new AgentLoadException(msg);
+            } else {
+                if (message.isEmpty())
+                    message = "Command failed in target VM";
+                throw new AttachOperationFailedException(message);
+            }
+        }
+    }
+
+    /*
+     * InputStream for the socket connection to get target VM
+     */
+    static abstract class SocketInputStream extends InputStream {
+        private final long fd;
+
+        public SocketInputStream(int fd) {
+            this.fd = fd;
+        }
+
+        protected abstract int readImpl(long fd, byte[] bs, int off, int len) throws IOException;
+        protected abstract void closeImpl(long fd) throws IOException;
+
+        public synchronized int read() throws IOException {
+            byte b[] = new byte[1];
+            int n = this.read(b, 0, 1);
+            if (n == 1) {
+                return b[0] & 0xff;
+            } else {
+                return -1;
+            }
+        }
+
+        public synchronized int read(byte[] bs, int off, int len) throws IOException {
+            if ((off < 0) || (off > bs.length) || (len < 0) ||
+                ((off + len) > bs.length) || ((off + len) < 0)) {
+                throw new IndexOutOfBoundsException();
+            } else if (len == 0) {
+                return 0;
+            }
+            return readImpl(fd, bs, off, len);
+        }
+
+        public synchronized void close() throws IOException {
+            if (fd != -1) {
+                closeImpl(fd);
+            }
+        }
+    }
 
     // -- attach timeout support
 
